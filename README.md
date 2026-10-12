@@ -51,8 +51,15 @@ uses the old admin password for that room can also open `/site-admin` and every 
 ## Mod page (`/<room>/mod`)
 A separate login for people who should only check off words. It is the whole front page (card search, top-20 board with clickable names,
 called words, leaderboards) and, once logged in, a **Call words** panel on top to call and un-call words. No settings, no points, no starting
-or ending games. The mod password is made on first start and kept on the admin page, hidden until you press **Show** (there is also a **Copy** button).
-You can change it there. The room's admin password (and the site owner's) also opens the mod page.
+or ending games.
+
+**Mod logins.** On the admin page under **Mod logins**, add each mod by name. Each gets their own random password, shown once (there is a
+**Copy** button); **New password** replaces it and **Remove** locks them out. The mod page shows who is logged in, and every call they make is
+logged under their name. There is also one **shared mod password** for rooms that prefer it (calls then show as "shared mod login"); it can
+be switched off so only named logins work. The room's admin password (and the site owner's) also opens the mod page.
+
+**Mod activity**, at the bottom of the admin page, lists every word called or un-called (the last 100): when, who, and from where
+(the mod page, the admin page, or a chat command on Twitch, Kick, YouTube or Rumble).
 
 ## Admin page
 Start and end games, click words to call them, edit the word list, upload the card background, set the chat channels,
@@ -60,6 +67,9 @@ change points and payouts, rename the page, choose whether words called before s
 A new room starts blank: no chat channels, a general-purpose word list and "points" as the currency.
 Set your channels, words, title and payouts on the admin page. The admin page also shows the room's address, whether its chat is
 connected or asleep, a switch for being listed on the home page, and a box to change the room's admin password.
+**Card background:** every room picks a background colour for its cards (or keeps the default dark gradient). Featured rooms can
+also upload a background image; the admin page shrinks it to the card's size before uploading, so phone photos and large
+screenshots work.
 To give every new room a different starting word list, put a `words.default.txt` (one word per line) in `DATA_DIR`.
 
 ### Viewers marking their own cards

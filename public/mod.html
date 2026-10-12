@@ -21,6 +21,7 @@
 .mwords button i { font-style: normal; opacity: .65; min-width: 2em; font-variant-numeric: tabular-nums; }
 .mwords button[disabled] { opacity: .6; cursor: default; }
 .mwords button .wt { flex: 1; }
+.mwho { color: var(--muted); font-size: .9rem; margin-left: auto; margin-right: 10px; }
 .mwords button .vc { font-size: .8rem; padding: 1px 8px; border-radius: 99px; background: var(--bg); border: 1px solid var(--line); align-self: center; white-space: nowrap; }
 .mtop { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 </style>
@@ -37,7 +38,7 @@
   <section class="panel modbox" id="mLogin" aria-labelledby="mLoginH" hidden>
     <h2 id="mLoginH">Mod login</h2>
     <form id="mLoginForm">
-      <label for="mPw">Password</label>
+      <label for="mPw">Your mod password (from the streamer)</label>
       <input type="password" id="mPw" autocomplete="current-password">
       <button class="btn" type="submit">Log in</button>
       <p class="mmsg err" id="mLoginMsg" role="alert"></p>
@@ -46,7 +47,7 @@
   </section>
 
   <section class="panel modbox" id="mPanel" aria-labelledby="mPanelH" hidden>
-    <div class="mtop"><h2 id="mPanelH" style="margin:0">Call words</h2><button class="btn ghost" id="mLogout" type="button">Log out</button></div>
+    <div class="mtop"><h2 id="mPanelH" style="margin:0">Call words</h2><span class="mwho" id="mWho"></span><button class="btn ghost" id="mLogout" type="button">Log out</button></div>
     <p id="mGameLine" style="margin:8px 0 0">Loading</p>
     <label for="mFind">Find a word</label>
     <input type="text" id="mFind" placeholder="Type to filter the list" autocomplete="off">
@@ -141,6 +142,7 @@
 
   function render() {
     const g = D.game;
+    $('mWho').textContent = D.loggedInAs ? 'Logged in as ' + D.loggedInAs : '';
     $('mGameLine').textContent = g.active ? `Game #${g.number} is live. ${g.called.length} of ${g.phrases.length} words called.` : 'No game is running. Ask the streamer to start one.';
     const q = $('mFind').value.trim().toLowerCase();
     const list = $('mList'); list.replaceChildren();

@@ -29,6 +29,7 @@
     canvas.width = W; canvas.height = H;
     const ctx = canvas.getContext('2d');
     if (bg) { const k = Math.max(W / bg.width, H / bg.height); ctx.drawImage(bg, (W - bg.width * k) / 2, (H - bg.height * k) / 2, bg.width * k, bg.height * k); }
+    else if (/^#[0-9a-f]{6}$/i.test(layout.bgColor || '')) { ctx.fillStyle = layout.bgColor; ctx.fillRect(0, 0, W, H); }   // the room's chosen colour
     else { const g = ctx.createLinearGradient(0, 0, W, H); g.addColorStop(0, '#1b1038'); g.addColorStop(1, '#3a0f4d'); ctx.fillStyle = g; ctx.fillRect(0, 0, W, H); }
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.shadowColor = 'rgba(0,0,0,0.8)'; ctx.shadowBlur = 12;

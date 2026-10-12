@@ -112,11 +112,19 @@ async function roomAdminAuth(e, given, ip) {
   if (hashingPaused(ip)) return 'paused';
   return (await rooms.passwordCheck(e.game, given)) ? 'ok' : 'wrong';
 }
-// a room's mod page: the room's mod password, or anything that opens its admin page
+// a room's mod page: a named mod login, the shared mod password (if the room still allows it), or anything that opens
+// its admin page. Returns { status: 'ok' | 'wrong' | 'paused', who, mod }.
 async function roomModAuth(e, given, ip) {
-  if (given && same(given, e.game.state.settings.modPassword)) return 'ok';
-  return roomAdminAuth(e, given, ip);
+  if (!given) return { status: 'wrong' };
+  const m = e.game.findMod(given);
+  if (m) return { status: 'ok', who: m.name, mod: m };
+  const s = e.game.state.settings;
+  if (s.sharedModLogin !== false && same(given, s.modPassword)) return { status: 'ok', who: 'shared mod login' };
+  const a = await roomAdminAuth(e, given, ip);
+  return { status: a, who: 'admin' };
 }
+// card background images are for featured rooms only; other rooms pick a colour
+const bgAllowed = (e) => rooms.isDedicated(e);
 
 function readBody(req, limit) {
   return new Promise((resolve, reject) => {
@@ -184,7 +192,7 @@ const admin = {
     rooms.wake(e);   // opening the admin page connects a sleeping room's chat
     const a = e.game.adminState();
     const { modPassword, ...settings } = a.settings;
-    return { ...a, settings, room: roomInfo(e), modPassword, modPasswordLocked: false, chat: e.chat.status, chatLog: e.chat.log, hasBackground: fs.existsSync(bgFile(e)) };
+    return { ...a, settings, room: roomInfo(e), modPassword, modPasswordLocked: false, chat: e.chat.status, chatLog: e.chat.log, hasBackground: bgAllowed(e) && fs.existsSync(bgFile(e)), backgroundAllowed: bgAllowed(e), maxBackgroundMB: MAX_BG_BYTES / 1048576 };
   },
   async modpassword(e, b) {
     const pw = str(b.password, 60) || crypto.randomBytes(6).toString('base64url');
@@ -236,8 +244,12 @@ const admin = {
     r.hiddenTemplates = [...set].slice(-500); e.game.save(); return {};
   },
   async end(e) { return { summary: e.game.endGame() }; },
-  async mark(e, b) { return e.game.mark(str(b.word, 100), true, 'admin'); },
-  async unmark(e, b) { return e.game.mark(str(b.word, 100), false, 'admin'); },
+  async mark(e, b) { return e.game.mark(str(b.word, 100), true, 'admin', 'admin page'); },
+  async unmark(e, b) { return e.game.mark(str(b.word, 100), false, 'admin', 'admin page'); },
+  // ---- named mod logins ----
+  async modadd(e, b) { return e.game.addMod(b.name); },
+  async modreset(e, b) { return e.game.resetMod(str(b.id, 20)); },
+  async modremove(e, b) { e.game.removeMod(str(b.id, 20)); return {}; },
   async phrases(e, b) {
     if (!Array.isArray(b.phrases)) throw new Error('phrases must be a list');
     const list = [...new Set(b.phrases.map((s) => str(s, 80)).filter(Boolean))].slice(0, 300);
@@ -271,6 +283,7 @@ const admin = {
     if ('viewerMarking' in b) s.viewerMarking = !!b.viewerMarking;
     if ('manualMarking' in b) s.manualMarking = !!b.manualMarking;
     if (!s.viewerMarking) s.manualMarking = false;   // no auto-marking only makes sense when viewers can mark
+    if ('sharedModLogin' in b) s.sharedModLogin = !!b.sharedModLogin;
     if ('allowMods' in b) s.allowMods = !!b.allowMods;
     if ('allowVips' in b) s.allowVips = !!b.allowVips;
     if ('title' in b) s.title = str(b.title, 40) || s.title;
@@ -284,6 +297,8 @@ const admin = {
       L.width = clampInt(q.width, 300, 3000, L.width); L.height = clampInt(q.height, 300, 4000, L.height);
       for (const [box, keys] of [['nameBox', ['x', 'y', 'w', 'h']], ['grid', ['x', 'y', 'size']]]) if (q[box]) for (const k of keys) L[box][k] = clampInt(q[box][k], 0, 4000, L[box][k]);
       for (const k of ['accent', 'cellFill', 'cellBorder', 'textColor']) if (k in q) { const v = str(q[k], 40); if (/^(#[0-9a-f]{3,8}|rgba?\([\d\s.,%]+\)|[a-z]+)$/i.test(v)) L[k] = v; }
+      // the card's background colour when there is no image ('' = the default dark gradient)
+      if ('bgColor' in q) { const v = str(q.bgColor, 7); if (v === '' || /^#[0-9a-f]{6}$/i.test(v)) L.bgColor = v.toLowerCase(); }
     }
     e.game.save(); return {};
   },
@@ -364,7 +379,7 @@ async function handleRoom(req, res, e, rest, url, ip) {
   if (rest === '/api/state') {
     // every viewer's page asks for this every 5 seconds, so the answer is reused for a second
     const now = Date.now();
-    if (!e.stateCache || now - e.stateCache.t > 1000) e.stateCache = { t: now, ...packed(JSON.stringify({ ...game.publicState(), room: name, hasBackground: fs.existsSync(bgFile(e)) })) };
+    if (!e.stateCache || now - e.stateCache.t > 1000) e.stateCache = { t: now, ...packed(JSON.stringify({ ...game.publicState(), room: name, hasBackground: bgAllowed(e) && fs.existsSync(bgFile(e)) })) };
     return sendPacked(req, res, e.stateCache);
   }
   if (rest === '/api/card') {
@@ -382,7 +397,7 @@ async function handleRoom(req, res, e, rest, url, ip) {
     catch (err) { return send(res, 400, { error: err.message }); }
   }
   if (rest === '/background') {
-    if (!fs.existsSync(bgFile(e))) return send(res, 404, 'No background');
+    if (!bgAllowed(e) || !fs.existsSync(bgFile(e))) return send(res, 404, 'No background');
     return sendFile(res, bgFile(e), { 'Content-Type': (game.state.settings.backgroundType || 'image/png'), 'Cache-Control': 'public, max-age=31536000, immutable' });
   }
 
@@ -399,6 +414,9 @@ async function handleRoom(req, res, e, rest, url, ip) {
     try {
       if (action === 'background') {
         if (req.method === 'DELETE') { try { fs.unlinkSync(bgFile(e)); } catch {} game.state.settings.backgroundVersion++; game.save(); return send(res, 200, {}); }
+        if (!bgAllowed(e)) return send(res, 403, { error: 'Background images are for featured rooms. Pick a background colour instead.' });
+        // a clear answer for files that are too big, before reading them (the admin page shrinks images first, so this is rare)
+        if (Number(req.headers['content-length']) > MAX_BG_BYTES) return send(res, 413, { error: `That image is over ${MAX_BG_BYTES / 1048576} MB. Use a smaller one.` }, { Connection: 'close' });
         const buf = await readBody(req, MAX_BG_BYTES);
         const type = sniff(buf);
         if (!type) throw new Error('Please upload a PNG, JPG or WEBP image.');
@@ -415,19 +433,21 @@ async function handleRoom(req, res, e, rest, url, ip) {
   if (rest.startsWith('/api/mod/')) {
     if (limited(ip, 'mod', 120, 60000)) return send(res, 429, { error: 'Too many requests.' });
     const auth = await roomModAuth(e, req.headers['x-mod-password'] || '', ip);
-    if (auth === 'paused') return send(res, 429, { error: 'Too many wrong passwords. Try again in 10 minutes.' });
-    if (auth !== 'ok') {
+    if (auth.status === 'paused') return send(res, 429, { error: 'Too many wrong passwords. Try again in 10 minutes.' });
+    if (auth.status !== 'ok') {
       if (tooManyBad(ip, 'badmodpw:' + name)) return send(res, 429, { error: 'Too many wrong passwords. Try again in 10 minutes.' });
       return send(res, 401, { error: 'Wrong password.' });
     }
     e.stateCache = null;
     const action = rest.slice('/api/mod/'.length);
     try {
-      if (action === 'status') { const g = game.adminState().game; return send(res, 200, { ok: true, title: game.state.settings.title, game: g }); }
+      if (action === 'status') { if (auth.mod) game.modUsed(auth.mod, false); const g = game.adminState().game; return send(res, 200, { ok: true, title: game.state.settings.title, game: g, loggedInAs: auth.who }); }
       if (action === 'mark' || action === 'unmark') {
         if (req.method !== 'POST') return send(res, 405, 'Method not allowed');
         const b = await readJson(req);
-        return send(res, 200, { ok: true, ...game.mark(str(b.word, 100), action === 'mark', 'mod page') });
+        const r = game.mark(str(b.word, 100), action === 'mark', auth.who, 'mod page');
+        if (auth.mod) game.modUsed(auth.mod, true);
+        return send(res, 200, { ok: true, ...r });
       }
       return send(res, 404, { error: 'Unknown action' });
     } catch (err) { return send(res, err.status || 400, { error: err.message }); }

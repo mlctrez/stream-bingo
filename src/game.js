@@ -1,6 +1,7 @@
 // Game rules, storage and leaderboards for one room. src/rooms.js makes one of these per room.
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 const BUNDLED_DIR = path.join(__dirname, '..', 'data');
@@ -40,7 +41,8 @@ function defaults() {
       manualMarking: false, // with viewerMarking: the public page does not fill in called words, viewers dab their own
       allowMods: true,   // may chat moderators call words with !mark / !unmark
       allowVips: true,   // may chat VIPs call words (the streamer / channel owner always can)
-      modPassword: '',   // password for the mod page; made on first start when empty
+      modPassword: '',   // the shared password for the mod page; made on first start when empty
+      sharedModLogin: true,   // may the shared mod password still be used (named mod logins always work)
       weeklyDay: 0,
       weeklyHour: 20,
       title: 'STREAM BINGO',
@@ -56,6 +58,8 @@ function defaults() {
     },
     game: { active: false, number: 0, startedAt: 0, phrases: [], called: [], players: {}, bingoOrder: [], blackoutOrder: [], viewMarks: {}, markerCards: {}, cardMarkers: {}, lastActivity: 0 },
     templates: [],   // this room's own saved word lists: [{ id, name, phrases }]
+    mods: [],        // named mod logins: [{ id, name, salt, hash, created, lastUsed, calls }] (only a hash of each password)
+    modLog: [],      // who called or un-called which word, from where: newest first, last 300
     accounts: {},
     week: { id: '' },
     lastWeek: null,
@@ -93,6 +97,8 @@ function load() {
     state = defaults();
   }
   delete state.events; delete state.eventSeq;   // left over from older versions
+  if (!Array.isArray(state.mods)) state.mods = [];
+  if (!Array.isArray(state.modLog)) state.modLog = [];
   if (!state.game.viewMarks) state.game.viewMarks = {};
   if (!state.game.markerCards) state.game.markerCards = {};
   if (!state.game.cardMarkers) state.game.cardMarkers = {};
@@ -260,7 +266,7 @@ function resolve(g, input) {
   throw new Error(`Several words match: ${hits.slice(0, 4).map(([p, n]) => `#${n} ${p}`).join(' | ')}. Use the number.`);
 }
 
-function mark(input, on, who = 'mod') {
+function mark(input, on, who = 'mod', source = '') {
   const g = state.game;
   if (!g.active) throw new Error('No bingo game is running.');
   const nums = resolve(g, input);
@@ -275,7 +281,12 @@ function mark(input, on, who = 'mod') {
     }
   }
   if (!changed.length) throw new Error(on ? 'Already called.' : 'Not called yet.');
-  for (const n of changed) feedAdd(on ? 'call' : 'uncall', `${on ? 'Called' : 'Un-called'} #${n} ${g.phrases[n - 1]} (by ${who})`);
+  const where = source === 'mod page' ? ' on the mod page' : '';
+  for (const n of changed) {
+    feedAdd(on ? 'call' : 'uncall', `${on ? 'Called' : 'Un-called'} #${n} ${g.phrases[n - 1]} (by ${who}${where})`);
+    state.modLog.unshift({ t: Date.now(), who, source: source || 'chat', action: on ? 'called' : 'un-called', n, word: g.phrases[n - 1], game: g.number });
+  }
+  if (state.modLog.length > 300) state.modLog.length = 300;
   touch(); g.lastActivity = Date.now();
   const wins = on ? checkWinners(g) : [];
   save();
@@ -310,8 +321,8 @@ function handleChat(m) {
   try {
     switch (cmd) {
       case '!enter': return { ok: true, ...enter(m.platform, m.userId, m.name, arg) };
-      case '!mark': if (!canMark) return null; return { ok: true, ...mark(arg, true, m.name) };
-      case '!unmark': if (!canMark) return null; return { ok: true, ...mark(arg, false, m.name) };
+      case '!mark': if (!canMark) return null; return { ok: true, ...mark(arg, true, m.name, 'chat (' + m.platform + ')') };
+      case '!unmark': if (!canMark) return null; return { ok: true, ...mark(arg, false, m.name, 'chat (' + m.platform + ')') };
       case '!bingostart': if (!isMod) return null; startGame(); return { ok: true };
       case '!bingoend': if (!isMod) return null; endGame(); return { ok: true };
       case '!givepoints': {
@@ -476,6 +487,47 @@ function publicState() {
   };
 }
 
+// ---------- named mod logins ----------
+// Each mod gets their own random password, so calls on the mod page are logged under their name. Passwords are random
+// (not chosen by people), so a salted SHA-256 is enough to store them; the plain password is shown to the admin once.
+const modHash = (salt, pw) => crypto.createHash('sha256').update(salt + '\0' + pw).digest('base64url');
+const newModPassword = () => crypto.randomBytes(9).toString('base64url');
+function cleanModName(v) {
+  const n = String(v == null ? '' : v).trim().replace(/\s+/g, ' ').slice(0, 30);
+  if (!n) throw new Error('Give the mod a name (their chat name works well).');
+  return n;
+}
+function addMod(name) {
+  const n = cleanModName(name);
+  if (state.mods.length >= 50) throw new Error('This room has 50 mod logins already. Remove one first.');
+  if (state.mods.some((m) => m.name.toLowerCase() === n.toLowerCase())) throw new Error(`There is already a mod login called "${n}".`);
+  const salt = crypto.randomBytes(12).toString('base64url'), password = newModPassword();
+  const m = { id: crypto.randomBytes(6).toString('base64url'), name: n, salt, hash: modHash(salt, password), created: Date.now(), lastUsed: 0, calls: 0 };
+  state.mods.push(m); save();
+  return { id: m.id, name: m.name, password };
+}
+function resetMod(id) {
+  const m = state.mods.find((x) => x.id === id); if (!m) throw new Error('No such mod login.');
+  const password = newModPassword(); m.salt = crypto.randomBytes(12).toString('base64url'); m.hash = modHash(m.salt, password); save();
+  return { id: m.id, name: m.name, password };
+}
+function removeMod(id) {
+  const n = state.mods.length; state.mods = state.mods.filter((x) => x.id !== id);
+  if (state.mods.length === n) throw new Error('No such mod login.');
+  save();
+}
+// the mod whose password this is, or null
+function findMod(given) {
+  if (!given) return null;
+  for (const m of state.mods) {
+    const a = Buffer.from(modHash(m.salt, given)), b = Buffer.from(m.hash);
+    if (a.length === b.length && crypto.timingSafeEqual(a, b)) return m;
+  }
+  return null;
+}
+function modUsed(m, called) { m.lastUsed = Date.now(); if (called) m.calls = (m.calls || 0) + 1; save(); }
+const modList = () => state.mods.map((m) => ({ id: m.id, name: m.name, created: m.created, lastUsed: m.lastUsed, calls: m.calls || 0 }));
+
 function adminState() {
   const g = state.game, s0 = state.settings;
   return {
@@ -485,12 +537,15 @@ function adminState() {
       closedIdle: !!g.closedIdle, closedAt: g.closedAt || 0, reopensLeft: reopensLeft(), lastActivity: g.lastActivity || 0,
       viewCounts: s0.viewerMarking ? viewCounts(g) : {},
     },
+    mods: modList(),
+    modLog: state.modLog.slice(0, 100),
   };
 }
 
 return {
   dir, load, saveNow, save, touch, get state() { return state; }, get slug() { return state.room.slug; },
   startGame, endGame, enter, mark, givePoints, handleChat, lookup, publicState, adminState, weekId, tickWeek,
+  addMod, resetMod, removeMod, findMod, modUsed, modList,
   idleCheck, reopen, reopensLeft, viewMark, viewCounts, multiMarked: (key) => multiMarked(state.game, key), REOPENS_PER_DAY,
 };
 }

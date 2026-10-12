@@ -193,13 +193,17 @@ const t = (name, fn) => Promise.resolve().then(fn).then(() => { pass++; console.
     assert.strictEqual(s.points.bingoReward, 75); assert.strictEqual(s.points.maxWager, 1000);
     assert.notStrictEqual(s.layout.accent, 'javascript:alert(1)'); assert.strictEqual(s.layout.width, 1200);
   });
-  await t('admin: background upload checks the file type', async () => {
+  await t('admin: background images work in featured rooms, and the file type is checked', async () => {
+    game.state.room.kind = 'dedicated';
     const bad = await fetch(base + '/api/admin/background', { method: 'POST', headers: { 'x-admin-password': 'pw-test' }, body: Buffer.from('not an image') });
     assert.strictEqual(bad.status, 400);
     const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
     const ok = await fetch(base + '/api/admin/background', { method: 'POST', headers: { 'x-admin-password': 'pw-test', 'Content-Type': 'image/png' }, body: png });
     assert.strictEqual(ok.status, 200);
     const got = await fetch(base + '/background'); assert.strictEqual(got.status, 200); assert.strictEqual(got.headers.get('content-type'), 'image/png');
+    // a room that stops being featured stops showing its image (the file is kept)
+    game.state.room.kind = 'community';
+    assert.strictEqual((await fetch(base + '/background')).status, 404);
   });
   await t('static pages serve and path traversal is refused', async () => {
     for (const p of ['/', '/admin', '/mod']) assert.strictEqual((await fetch(base + p)).status, 200, p);
@@ -654,14 +658,15 @@ const t = (name, fn) => Promise.resolve().then(fn).then(() => { pass++; console.
       const adminPage = await fetch(b4 + '/sec-room-1/admin'), viewer = await fetch(b4 + '/sec-room-1/'), siteP = await fetch(b4 + '/site-admin');
       for (const r of [adminPage, siteP]) { assert.strictEqual(r.headers.get('x-frame-options'), 'DENY'); assert.match(r.headers.get('content-security-policy'), /frame-ancestors 'none'/); }
       assert.strictEqual(viewer.headers.get('x-frame-options'), null); assert.match(viewer.headers.get('content-security-policy'), /connect-src 'self'/);
-      // background uploads are capped (MAX_BACKGROUND_MB=1 here)
+      // background uploads are capped (MAX_BACKGROUND_MB=1 here), with a clear message
+      await post('/api/site/update', { name: 'sec-room-3', dedicated: true }, { 'x-admin-password': 'owner-pw', 'x-forwarded-for': '62.0.0.2' });
       const big = Buffer.alloc(1.5 * 1024 * 1024); big.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
       const up = await fetch(b4 + '/sec-room-3/api/admin/background', { method: 'POST', headers: { 'x-admin-password': made[3].password, 'x-forwarded-for': '61.0.0.1' }, body: big }).catch(() => ({ status: 413 }));
       assert.strictEqual(up.status, 413);
       // at most MAX_AWAKE_ROOMS (2 here) community rooms keep chat connected; the most recently used win
       await post('/api/site/update', { name: 'sec-room-0', listed: true }, { 'x-admin-password': 'owner-pw', 'x-forwarded-for': '62.0.0.1' });   // runs a tick
       const list = (await post('/api/site/status', {}, { 'x-admin-password': 'owner-pw', 'x-forwarded-for': '62.0.0.1' })).body.rooms;
-      assert.strictEqual(list.filter((r) => r.chat === 'on').length, 2, list.map((r) => r.name + ':' + r.chat).join(' '));
+      assert.strictEqual(list.filter((r) => r.kind !== 'dedicated' && r.chat === 'on').length, 2, list.map((r) => r.name + ':' + r.chat).join(' '));
     } finally { child.kill('SIGTERM'); }
   });
 
@@ -810,6 +815,14 @@ const t = (name, fn) => Promise.resolve().then(fn).then(() => { pass++; console.
       await S2('templatedelete', { id: st.body.id });
       assert.strictEqual((await S2('templates')).body.templates.length, 1);
       await A('templatedelete', { id: tl.mine[0].id }); assert.strictEqual((await A('templates')).body.mine.length, 0);
+      // card background colour: #rrggbb or empty; community rooms are told images are for featured rooms
+      assert.strictEqual((await A('status')).body.backgroundAllowed, false);
+      const png1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+      const refused = await fetch(b6 + '/tpl-room/api/admin/background', { method: 'POST', headers: { 'x-admin-password': mk.password, 'Content-Type': 'image/png' }, body: png1 });
+      assert.strictEqual(refused.status, 403); assert.match((await refused.json()).error, /featured rooms/);
+      await A('settings', { layout: { bgColor: '#123ABC' } });
+      await A('settings', { layout: { bgColor: 'url(x)' } });
+      assert.strictEqual((await fetch(b6 + '/tpl-room/api/state').then((r) => r.json())).layout.bgColor, '#123abc', 'junk is ignored');
       // page colours: only #rrggbb, shown to every visitor
       await A('settings', { theme: { bg: '#0b1726', panel: 'red; x', accent: '#3EC1FF', text: '' } });
       assert.deepStrictEqual((await fetch(b6 + '/tpl-room/api/state').then((r) => r.json())).theme, { bg: '#0b1726', panel: '', accent: '#3ec1ff', text: '' });
@@ -827,6 +840,53 @@ const t = (name, fn) => Promise.resolve().then(fn).then(() => { pass++; console.
       // re-open only applies to idle-closed games
       assert.match((await A('reopen')).body.error, /already running/);
       await A('end'); assert.match((await A('reopen')).body.error, /Only a game that was closed for being idle/);
+    } finally { child.kill('SIGTERM'); }
+  });
+
+  await t('named mod logins: own passwords, calls logged by name, removable; the shared password can be switched off', async () => {
+    const { spawn } = require('child_process');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bingo-mods-'));
+    const port = 3918, b7 = 'http://localhost:' + port;
+    const child = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], { env: { ...process.env, DATA_DIR: dir, PORT: String(port), SITE_ADMIN_PASSWORD: 'owner-pw', ADMIN_PASSWORD: '', TRUST_PROXY_HOPS: '' }, stdio: 'ignore' });
+    const call = (u, hdr, body) => fetch(b7 + u, { method: body === undefined ? 'GET' : 'POST', headers: { 'Content-Type': 'application/json', ...hdr }, body: body === undefined ? undefined : JSON.stringify(body) }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => null) }));
+    try {
+      for (let i = 0; i < 50; i++) { try { if ((await fetch(b7 + '/healthz')).ok) break; } catch {} await new Promise((r) => setTimeout(r, 100)); }
+      const mk = await call('/api/rooms', {}, { name: 'mod-room' }).then((r) => r.body);
+      const A = (action, body) => call('/mod-room/api/admin/' + action, { 'x-admin-password': mk.password }, body || {});
+      const M = (pw, action = 'status', body) => call('/mod-room/api/mod/' + action, { 'x-mod-password': pw }, body);
+      // add two mods; names must be unique
+      const ann = (await A('modadd', { name: 'Ann' })).body, bo = (await A('modadd', { name: 'Bo' })).body;
+      assert.ok(ann.password.length >= 12 && bo.password !== ann.password);
+      assert.strictEqual((await A('modadd', { name: 'ann' })).status, 400, 'names are unique');
+      assert.strictEqual((await A('modadd', { name: '  ' })).status, 400, 'a name is needed');
+      // the stored state has no plain passwords
+      const raw = fs.readFileSync(path.join(dir, 'rooms', 'mod-room', 'state.json'), 'utf8');
+      await new Promise((r) => setTimeout(r, 500));
+      assert.ok(!fs.readFileSync(path.join(dir, 'rooms', 'mod-room', 'state.json'), 'utf8').includes(ann.password) && !raw.includes(ann.password));
+      // each mod logs in with their own password and is named
+      assert.strictEqual((await M(ann.password)).body.loggedInAs, 'Ann');
+      await A('start');
+      await M(ann.password, 'mark', { word: '3' }); await M(bo.password, 'mark', { word: '4' }); await M(ann.password, 'unmark', { word: '3' });
+      await A('mark', { word: '5' });
+      await A('simulate', { name: 'ChatMod', platform: 'kick', text: '!mark 6', mod: true });
+      const st = (await A('status')).body;
+      const log = st.modLog.map((l) => `${l.who}|${l.source}|${l.action}|${l.n}`);
+      assert.deepStrictEqual(log.slice(0, 5), ['ChatMod|chat (kick)|called|6', 'admin|admin page|called|5', 'Ann|mod page|un-called|3', 'Bo|mod page|called|4', 'Ann|mod page|called|3']);
+      assert.deepStrictEqual(st.mods.map((m) => `${m.name}:${m.calls}`), ['Ann:2', 'Bo:1']);
+      assert.ok(st.mods.every((m) => !('hash' in m) && !('salt' in m)), 'no hashes sent to the page');
+      const feed = (await fetch(b7 + '/mod-room/api/state').then((r) => r.json())).feed.map((f) => f.text);
+      assert.ok(feed.some((t) => /Called #4 .* \(by Bo on the mod page\)/.test(t)), 'the public feed names the mod');
+      // a new password replaces the old; removing a mod locks them out
+      const bo2 = (await A('modreset', { id: bo.id })).body;
+      assert.strictEqual((await M(bo.password)).status, 401); assert.strictEqual((await M(bo2.password)).status, 200);
+      await A('modremove', { id: bo.id });
+      assert.strictEqual((await M(bo2.password)).status, 401);
+      // the shared password works until switched off; named logins keep working
+      assert.strictEqual((await M(mk.modPassword)).body.loggedInAs, 'shared mod login');
+      await A('settings', { sharedModLogin: false });
+      assert.strictEqual((await M(mk.modPassword)).status, 401);
+      assert.strictEqual((await M(ann.password)).status, 200);
+      assert.strictEqual((await M(mk.password)).body.loggedInAs, 'admin', 'the admin password still opens the mod page');
     } finally { child.kill('SIGTERM'); }
   });
 
