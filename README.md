@@ -138,6 +138,10 @@ Settings that matter on a server:
   `X-Forwarded-For`, because a visitor can type anything into that header. Behind a proxy that would make every visitor look like
   the proxy, so all viewers would share one rate limit (card lookups are 60 a minute) and the page could start answering
   "Slow down" during a busy stream. Leave it unset when people connect to the server directly.
+- `TRUST_REAL_IP=1`: for proxies on the same machine, such as the Anubis bot filter, that replace `X-Forwarded-For` with one
+  address and put the visitor's address in `X-Real-IP`. The server then uses `X-Real-IP`, but only on connections from the
+  machine itself. Only turn it on when the proxy in front **sets** `X-Real-IP` on every request; a proxy that passes along
+  whatever the visitor sent would let anyone choose their own address and get around the per-visitor limits.
 - Wrong passwords are limited to 8 per address and 60 in total per 10 minutes for each room's admin and mod pages and for
   `/site-admin`, and across all rooms to 20 per address and 300 in total. Room passwords are stored as scrypt hashes and checked
   off the main thread. Once the cross-room limit is reached, new password checks wait out the 10 minutes, but a password that

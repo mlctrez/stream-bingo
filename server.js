@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const zlib = require('zlib');
+const { isIP } = require('net');
 const { DATA_DIR } = require('./src/game');
 const rooms = require('./src/rooms');
 
@@ -41,8 +42,20 @@ const MAX_BG_BYTES = Math.max(1, Number(process.env.MAX_BACKGROUND_MB) || 4) * 1
 // Behind N reverse proxies (each appending the address it saw), set TRUST_PROXY_HOPS=N to use the entry N hops
 // from the right, which the nearest trusted proxy wrote. The leftmost entry is never used.
 const TRUST_PROXY_HOPS = (() => { const n = Number(process.env.TRUST_PROXY_HOPS); return Number.isInteger(n) && n > 0 ? n : 0; })();
+// Some proxies that run on the same machine (Anubis, for one) replace X-Forwarded-For with a single address and
+// pass the visitor's address on in X-Real-IP instead. With TRUST_REAL_IP=1 that header is used, but only on
+// connections that come from this machine itself. Leave it off unless the proxy in front SETS X-Real-IP on every
+// request: a proxy that passes the visitor's own X-Real-IP through would let anyone pick their address.
+const TRUST_REAL_IP = process.env.TRUST_REAL_IP === '1';
+const fromThisMachine = (a) => a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1';
+function realIpHeader(req) {
+  const v = req.headers['x-real-ip'];
+  const first = String(Array.isArray(v) ? v[0] : v || '').split(',')[0].trim();
+  return isIP(first) ? first : '';
+}
 function clientIp(req) {
   const sock = req.socket.remoteAddress || '';
+  if (TRUST_REAL_IP && fromThisMachine(sock)) { const real = realIpHeader(req); if (real) return real; }
   if (!TRUST_PROXY_HOPS) return sock;
   const h = req.headers['x-forwarded-for'];
   if (!h) return sock;

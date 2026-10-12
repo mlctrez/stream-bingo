@@ -473,6 +473,34 @@ const t = (name, fn) => Promise.resolve().then(fn).then(() => { pass++; console.
     } finally { child.kill('SIGTERM'); }
   });
 
+  await t('TRUST_REAL_IP: X-Real-IP from this machine names the visitor only when switched on; bad values are ignored', async () => {
+    const { spawn } = require('child_process');
+    const run = async (port, env, fn) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bingo-realip-'));
+      const child = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], { env: { ...process.env, DATA_DIR: dir, PORT: String(port), SITE_ADMIN_PASSWORD: 'owner-pw', ADMIN_PASSWORD: '', ...env }, stdio: 'ignore' });
+      const b = 'http://127.0.0.1:' + port;
+      try {
+        for (let i = 0; i < 50; i++) { try { if ((await fetch(b + '/healthz')).ok) break; } catch {} await new Promise((r) => setTimeout(r, 100)); }
+        await fn(b);
+      } finally { child.kill('SIGTERM'); }
+    };
+    const make = (b, name, hdr) => fetch(b + '/api/rooms', { method: 'POST', headers: { 'Content-Type': 'application/json', ...hdr }, body: JSON.stringify({ name }) }).then((r) => r.status);
+    // off (the default): the header is ignored, so all requests from here are one visitor: the 4th room is refused
+    await run(3916, { TRUST_PROXY_HOPS: '' }, async (b) => {
+      const st = []; for (let i = 0; i < 4; i++) st.push(await make(b, 'off-room-' + i, { 'x-real-ip': '203.0.113.' + i }));
+      assert.deepStrictEqual(st, [200, 200, 200, 429]);
+    });
+    // on: each X-Real-IP is its own visitor; a junk value falls back to the connection address (or the hop count)
+    await run(3917, { TRUST_REAL_IP: '1', TRUST_PROXY_HOPS: '' }, async (b) => {
+      const st = []; for (let i = 0; i < 4; i++) st.push(await make(b, 'on-room-' + i, { 'x-real-ip': '203.0.113.' + i }));
+      assert.deepStrictEqual(st, [200, 200, 200, 200], 'four visitors');
+      for (let i = 0; i < 3; i++) await make(b, 'junk-room-' + i, { 'x-real-ip': 'not-an-ip' });
+      assert.strictEqual(await make(b, 'junk-room-3', { 'x-real-ip': 'also; bad' }), 429, 'junk values are all the connection address');
+      for (let i = 0; i < 3; i++) await make(b, 'same-' + i, { 'x-real-ip': '198.51.100.7' });
+      assert.strictEqual(await make(b, 'same-3', { 'x-real-ip': '198.51.100.7' }), 429, 'the same X-Real-IP is one visitor');
+    });
+  });
+
   // ---------------- rooms ----------------
   await t('rooms: community rooms sleep chat when unused, wake on an admin visit, and expire; featured rooms never do', async () => {
     const a = rooms.create('sleepy-room').entry, f = rooms.create('featured-room', { kind: 'dedicated' }).entry;
