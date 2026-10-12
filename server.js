@@ -53,7 +53,20 @@ function realIpHeader(req) {
   const first = String(Array.isArray(v) ? v[0] : v || '').split(',')[0].trim();
   return isIP(first) ? first : '';
 }
+// When a request came through a proxy on this machine but its visitor's address could not be worked out, every visitor
+// looks the same. Per-address limits would then be shared by the whole audience (a few viewers would use up everyone's
+// card lookups), so such requests get this marker instead: per-address limits skip it and only site-wide limits apply.
+const SHARED = 'shared-proxy-address';
+let warnedShared = false;
 function clientIp(req) {
+  const ip = resolveIp(req);
+  if (fromThisMachine(ip) && (req.headers['x-forwarded-for'] || req.headers['x-real-ip'])) {
+    if (!warnedShared) { warnedShared = true; console.warn('Requests come through a proxy, but the visitor address is not used, so every visitor looks the same. ' + 'Set TRUST_PROXY_HOPS (for X-Forwarded-For) or TRUST_REAL_IP=1 (for X-Real-IP from a proxy on this machine). See README.'); }
+    return SHARED;
+  }
+  return ip;
+}
+function resolveIp(req) {
   const sock = req.socket.remoteAddress || '';
   if (TRUST_REAL_IP && fromThisMachine(sock)) { const real = realIpHeader(req); if (real) return real; }
   if (!TRUST_PROXY_HOPS) return sock;
@@ -78,6 +91,7 @@ function hit(map, k, max, windowMs) {
   return b.length > max;
 }
 function limited(ip, name, max, windowMs) {
+  if (ip === SHARED) return false;   // not one visitor: only the site-wide limits apply
   const over = hit(buckets, name + '|' + ip, max, windowMs);
   while (buckets.size > MAX_ADDR_KEYS) buckets.delete(buckets.keys().next().value);
   return over;
@@ -383,8 +397,14 @@ async function handleRoom(req, res, e, rest, url, ip) {
     return sendPacked(req, res, e.stateCache);
   }
   if (rest === '/api/card') {
-    if (limited(ip, 'card', 60, 60000)) return send(res, 429, { error: 'Slow down a little.' });
-    return sendPacked(req, res, packed(JSON.stringify({ matches: game.lookup(url.searchParams.get('name') || '') })));
+    // each open card page asks every 5 seconds (12 a minute), so 240 leaves room for a household sharing one address
+    if (limited(ip, 'card', 240, 60000)) return send(res, 429, { error: 'Slow down a little.' });
+    // the answer for a name is reused for up to a second (until the game changes), so many viewers watching the same card cost one lookup
+    const q = String(url.searchParams.get('name') || '').slice(0, 60), qk = q.toLowerCase(), now = Date.now();
+    if (!e.cardCache || now - e.cardCache.t > 1000 || e.cardCache.rev !== game.rev) e.cardCache = { t: now, rev: game.rev, m: new Map() };
+    let hitc = e.cardCache.m.get(qk);
+    if (!hitc) { hitc = packed(JSON.stringify({ matches: game.lookup(q) })); if (e.cardCache.m.size < 5000) e.cardCache.m.set(qk, hitc); }
+    return sendPacked(req, res, hitc);
   }
   if (rest === '/api/viewmark') {
     if (req.method !== 'POST') return send(res, 405, 'Method not allowed');
@@ -392,7 +412,8 @@ async function handleRoom(req, res, e, rest, url, ip) {
     if (limited(ip, 'viewmark', 120, 60000)) return send(res, 429, { error: 'Slow down a little.' });
     const b = await readJson(req);
     // who is marking: their address and the random id their browser keeps
-    const markers = ['ip:' + ip, /^[A-Za-z0-9_-]{8,40}$/.test(String(b.viewer || '')) ? 't:' + b.viewer : ''];
+    // (no address marker when every visitor looks the same: it would tie all viewers together as one person)
+    const markers = [ip === SHARED ? '' : 'ip:' + ip, /^[A-Za-z0-9_-]{8,40}$/.test(String(b.viewer || '')) ? 't:' + b.viewer : ''];
     try { const r = game.viewMark(str(b.name, 40), str(b.platform, 10), b.n, !!b.on, !!b.clear, markers); return send(res, 200, { ok: true, marks: r.marks }); }
     catch (err) { return send(res, 400, { error: err.message }); }
   }
@@ -466,7 +487,9 @@ async function handle(req, res) {
   // for hosting health checks (Render, Fly.io, Docker, uptime monitors)
   if (p === '/healthz') {
     const all = rooms.list();
-    return send(res, 200, { ok: true, rooms: all.length, live: all.filter((r) => r.live).length, chatOn: all.filter((r) => r.chat === 'on').length });
+    return send(res, 200, { ok: true, rooms: all.length, live: all.filter((r) => r.live).length, chatOn: all.filter((r) => r.chat === 'on').length,
+      // "shared" means requests come through a proxy whose visitor address is not being used (see TRUST_PROXY_HOPS)
+      visitorAddress: warnedShared ? 'shared' : 'per visitor' });
   }
 
   if (p === '/api/rooms') {

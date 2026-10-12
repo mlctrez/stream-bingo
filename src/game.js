@@ -117,7 +117,9 @@ function saveNow() {
   fs.writeFileSync(tmp, JSON.stringify(state));
   fs.renameSync(tmp, STATE_FILE);
 }
-function save() { if (!saveTimer) saveTimer = setTimeout(saveNow, 400); }
+// rev goes up on every change, so cached answers (the card lookups) know when they are out of date
+let rev = 0;
+function save() { rev++; if (!saveTimer) saveTimer = setTimeout(saveNow, 400); }
 // something happened in the room (a game, a call, an admin visit): keeps chat awake and the room from expiring
 function touch() { const now = Date.now(); if (now - (state.room.lastActive || 0) > 60000) { state.room.lastActive = now; save(); } }
 
@@ -543,7 +545,7 @@ function adminState() {
 }
 
 return {
-  dir, load, saveNow, save, touch, get state() { return state; }, get slug() { return state.room.slug; },
+  dir, load, saveNow, save, touch, get rev() { return rev; }, get state() { return state; }, get slug() { return state.room.slug; },
   startGame, endGame, enter, mark, givePoints, handleChat, lookup, publicState, adminState, weekId, tickWeek,
   addMod, resetMod, removeMod, findMod, modUsed, modList,
   idleCheck, reopen, reopensLeft, viewMark, viewCounts, multiMarked: (key) => multiMarked(state.game, key), REOPENS_PER_DAY,

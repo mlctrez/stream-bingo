@@ -422,22 +422,30 @@ const t = (name, fn) => Promise.resolve().then(fn).then(() => { pass++; console.
     game.endGame();
   });
 
-  await t('rate limits ignore X-Forwarded-For and the wrong-password cap cannot be wiped', async () => {
-    // (the admin route's 120/minute budget for this one test client is spent by the earlier tests, so this uses the mod route;
-    //  admin wrong-password counting is covered on a fresh server in the next test)
-    const badMod = (i) => J('/api/mod/status', { headers: { 'x-mod-password': 'wrong' + i, 'x-forwarded-for': `203.0.113.${i % 250}, 10.0.0.${i % 250}` } });
-    // earlier tests already used up this client's mod-password cap; new made-up addresses do not reset it
-    for (let i = 0; i < 3; i++) assert.strictEqual((await badMod(i)).status, 429);
-    // thousands of requests with a new X-Forwarded-For each: no fresh budget, no wiped counters
-    const flood = Array.from({ length: 3000 }, (_, i) => i);
-    for (let i = 0; i < flood.length; i += 150) {
-      const res = await Promise.all(flood.slice(i, i + 150).map((n) => fetch(base + '/api/card?name=x', { headers: { 'x-forwarded-for': `198.51.${n >> 8}.${n & 255}` } }).then((r) => r.status)));
-      if (i >= 150) assert.ok(res.every((s) => s === 429), 'a made-up X-Forwarded-For must not open a fresh card budget');
-    }
-    assert.strictEqual((await badMod(999)).status, 429);
-    assert.strictEqual((await badMod(1000)).status, 429);
-    // the right password still works
-    assert.strictEqual((await J('/api/mod/status', { headers: { 'x-mod-password': 'pw-test', 'x-forwarded-for': '1.2.3.4' } })).status, 200);
+  await t('a proxy whose visitor address is not used: viewers are not lumped into one budget, site-wide caps still hold', async () => {
+    const { spawn } = require('child_process');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bingo-shared-'));
+    const port = 3919, b2 = 'http://127.0.0.1:' + port;
+    const child = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], { env: { ...process.env, DATA_DIR: dir, PORT: String(port), SITE_ADMIN_PASSWORD: 'owner-pw', ADMIN_PASSWORD: 'adm-sh', TRUST_PROXY_HOPS: '', TRUST_REAL_IP: '' }, stdio: 'ignore' });
+    try {
+      for (let i = 0; i < 50; i++) { try { if ((await fetch(b2 + '/healthz')).ok) break; } catch {} await new Promise((r) => setTimeout(r, 100)); }
+      const made = await (await fetch(b2 + '/api/rooms', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'shared-test' }) })).json();
+      const room = made.name;
+      const card = (hdr) => fetch(b2 + '/' + room + '/api/card?name=x', { headers: hdr || {} }).then((r) => r.status);
+      assert.strictEqual((await (await fetch(b2 + '/healthz')).json()).visitorAddress, 'per visitor');
+      // a direct connection is one visitor with its own budget (240 a minute)
+      const direct = await Promise.all(Array.from({ length: 260 }, () => card()));
+      assert.ok(direct.slice(0, 240).every((s) => s === 200) && direct.slice(241).every((s) => s === 429), 'direct budget');
+      // through a proxy on this machine whose address is not used: not one visitor, so no shared budget runs out
+      const viaProxy = await Promise.all(Array.from({ length: 600 }, (_, i) => card({ 'x-forwarded-for': '203.0.113.' + (i % 250) })));
+      assert.ok(viaProxy.every((s) => s === 200), 'the audience does not share one card budget');
+      assert.strictEqual((await (await fetch(b2 + '/healthz')).json()).visitorAddress, 'shared', 'health check reports it');
+      // wrong passwords: the site-wide cap (60 per room page per 10 minutes) still holds; the right password still works
+      const guess = (pw) => fetch(b2 + '/' + room + '/api/mod/status', { headers: { 'x-mod-password': pw, 'x-forwarded-for': '198.51.100.1' } }).then((r) => r.status);
+      for (let i = 0; i < 60; i++) assert.strictEqual(await guess('bad' + i), 401, 'guess ' + i);
+      assert.strictEqual(await guess('bad-61'), 429, 'site-wide cap');
+      assert.strictEqual(await guess(made.password), 200, 'right password still works');
+    } finally { child.kill('SIGTERM'); }
   });
 
   await t('TRUST_PROXY_HOPS=1 uses the rightmost X-Forwarded-For entry, and global caps survive address floods', async () => {
@@ -477,7 +485,7 @@ const t = (name, fn) => Promise.resolve().then(fn).then(() => { pass++; console.
     } finally { child.kill('SIGTERM'); }
   });
 
-  await t('TRUST_REAL_IP: X-Real-IP from this machine names the visitor only when switched on; bad values are ignored', async () => {
+  await t('TRUST_REAL_IP: X-Real-IP from this machine names the visitor only when switched on; bad values name nobody', async () => {
     const { spawn } = require('child_process');
     const run = async (port, env, fn) => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bingo-realip-'));
@@ -489,17 +497,21 @@ const t = (name, fn) => Promise.resolve().then(fn).then(() => { pass++; console.
       } finally { child.kill('SIGTERM'); }
     };
     const make = (b, name, hdr) => fetch(b + '/api/rooms', { method: 'POST', headers: { 'Content-Type': 'application/json', ...hdr }, body: JSON.stringify({ name }) }).then((r) => r.status);
-    // off (the default): the header is ignored, so all requests from here are one visitor: the 4th room is refused
+    // off (the default): the header is not used to tell visitors apart; requests through such a proxy are not one visitor
+    // either (that would make the whole audience share one budget), so only the site-wide limits apply
     await run(3916, { TRUST_PROXY_HOPS: '' }, async (b) => {
-      const st = []; for (let i = 0; i < 4; i++) st.push(await make(b, 'off-room-' + i, { 'x-real-ip': '203.0.113.' + i }));
-      assert.deepStrictEqual(st, [200, 200, 200, 429]);
+      const st = []; for (let i = 0; i < 4; i++) st.push(await make(b, 'off-room-' + i, { 'x-real-ip': '203.0.113.7' }));
+      assert.deepStrictEqual(st, [200, 200, 200, 200]);
+      // a direct connection (no proxy headers) is still one visitor: 3 rooms an hour
+      const d = []; for (let i = 0; i < 4; i++) d.push(await make(b, 'direct-room-' + i, {}));
+      assert.deepStrictEqual(d, [200, 200, 200, 429]);
     });
     // on: each X-Real-IP is its own visitor; a junk value falls back to the connection address (or the hop count)
     await run(3917, { TRUST_REAL_IP: '1', TRUST_PROXY_HOPS: '' }, async (b) => {
       const st = []; for (let i = 0; i < 4; i++) st.push(await make(b, 'on-room-' + i, { 'x-real-ip': '203.0.113.' + i }));
       assert.deepStrictEqual(st, [200, 200, 200, 200], 'four visitors');
-      for (let i = 0; i < 3; i++) await make(b, 'junk-room-' + i, { 'x-real-ip': 'not-an-ip' });
-      assert.strictEqual(await make(b, 'junk-room-3', { 'x-real-ip': 'also; bad' }), 429, 'junk values are all the connection address');
+      // junk values name nobody: not used as an address
+      for (let i = 0; i < 4; i++) assert.strictEqual(await make(b, 'junk-room-' + i, { 'x-real-ip': 'not-an-ip' }), 200, 'junk value ' + i);
       for (let i = 0; i < 3; i++) await make(b, 'same-' + i, { 'x-real-ip': '198.51.100.7' });
       assert.strictEqual(await make(b, 'same-3', { 'x-real-ip': '198.51.100.7' }), 429, 'the same X-Real-IP is one visitor');
     });

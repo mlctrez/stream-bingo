@@ -145,9 +145,12 @@ Settings that matter on a server:
 - `TRUST_PROXY_HOPS`: **set this when the site sits behind a reverse proxy** (Render, Railway, Fly.io, Caddy, nginx, a Cloudflare
   tunnel). Use the number of proxies in front of the server, usually `1`. The rate limits then use the visitor address that proxy
   wrote (the right-hand end of `X-Forwarded-For`). Without it the server only trusts the connection itself and ignores
-  `X-Forwarded-For`, because a visitor can type anything into that header. Behind a proxy that would make every visitor look like
-  the proxy, so all viewers would share one rate limit (card lookups are 60 a minute) and the page could start answering
-  "Slow down" during a busy stream. Leave it unset when people connect to the server directly.
+  `X-Forwarded-For`, because a visitor can type anything into that header. Leave it unset when people connect to the server
+  directly.
+- If requests reach the server through a proxy on the same machine but neither setting gives a visitor address, every visitor
+  looks the same. The server then logs a warning once, `/healthz` shows `"visitorAddress":"shared"`, and per-visitor limits
+  are skipped for those requests (otherwise the whole audience would share one visitor's card lookups and pages would stop
+  loading). Only the site-wide limits protect the site in that state, so set `TRUST_PROXY_HOPS` or `TRUST_REAL_IP` to fix it.
 - `TRUST_REAL_IP=1`: for proxies on the same machine, such as the Anubis bot filter, that replace `X-Forwarded-For` with one
   address and put the visitor's address in `X-Real-IP`. The server then uses `X-Real-IP`, but only on connections from the
   machine itself. Only turn it on when the proxy in front **sets** `X-Real-IP` on every request; a proxy that passes along

@@ -190,7 +190,12 @@ async function loadCard(prefer) {
   if (!name) return;
   try {
     const keep = prefer || (matches[pick] && matches[pick].platform);
-    matches = (await (await fetch('api/card?name=' + encodeURIComponent(name))).json()).matches || [];
+    const r = await fetch('api/card?name=' + encodeURIComponent(name));
+    // a busy or failed answer is not "nobody by that name": keep showing the last card and ask again next time
+    if (!r.ok) { if (!matches.length) { $('noCard').hidden = false; $('cardArea').hidden = true; $('noCard').textContent = 'Looking up your card… the site is busy, trying again in a few seconds.'; } return; }
+    const got = (await r.json()).matches;
+    if (!Array.isArray(got)) return;
+    matches = got;
     const idx = matches.findIndex((m) => m.platform === keep); pick = idx >= 0 ? idx : 0;
     if (S) { renderCard(); renderLive(); }
   } catch {}
