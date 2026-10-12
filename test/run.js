@@ -473,6 +473,26 @@ const t = (name, fn) => Promise.resolve().then(fn).then(() => { pass++; console.
     } finally { child.kill('SIGTERM'); }
   });
 
+  await t('loopback X-Real-IP is the client and a direct spoof still uses the hop count', async () => {
+    const { spawn } = require('child_process');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bingo-realip-'));
+    fs.copyFileSync(path.join(__dirname, '..', 'data', 'words.default.txt'), path.join(dir, 'words.default.txt'));
+    fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ settings: { channels: { twitch: '', kick: '', youtube: '', rumble: '', kickChatroomId: '' } } }));
+    const port = 3913, b = 'http://127.0.0.1:' + port;
+    const child = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
+      env: { ...process.env, DATA_DIR: dir, PORT: String(port), ADMIN_PASSWORD: 'adm-real', MOD_PASSWORD: 'mod-real', TRUST_PROXY_HOPS: '2', BINGO_NO_SEED: '1' }, stdio: 'ignore',
+    });
+    try {
+      for (let i = 0; i < 50; i++) { try { if ((await fetch(b + '/healthz')).ok) break; } catch {} await new Promise((r) => setTimeout(r, 100)); }
+      const guess = (headers, pw = 'bad') => fetch(b + '/api/mod/status', { headers: { 'x-mod-password': pw, ...headers } }).then((r) => r.status);
+      for (let i = 0; i < 8; i++) assert.strictEqual(await guess({ 'x-real-ip': '203.0.113.9', 'x-forwarded-for': `198.51.100.${i}, 192.0.2.1` }), 401);
+      assert.strictEqual(await guess({ 'x-real-ip': '203.0.113.9', 'x-forwarded-for': '198.51.100.50, 192.0.2.8' }), 429, 'same X-Real-IP stays one client');
+      assert.strictEqual(await guess({ 'x-real-ip': '203.0.113.10', 'x-forwarded-for': '198.51.100.50, 192.0.2.8' }), 401, 'a different X-Real-IP is a different client');
+      assert.strictEqual(await guess({ 'x-real-ip': 'not-an-ip', 'x-forwarded-for': '203.0.113.50, 192.0.2.50' }), 401, 'a bad X-Real-IP falls back to the hop count');
+      assert.strictEqual(await guess({ 'x-forwarded-for': '203.0.113.9, 192.0.2.9' }), 429, 'without X-Real-IP the hop count still sees 203.0.113.9');
+    } finally { child.kill('SIGTERM'); }
+  });
+
   // ---------------- rooms ----------------
   await t('rooms: community rooms sleep chat when unused, wake on an admin visit, and expire; featured rooms never do', async () => {
     const a = rooms.create('sleepy-room').entry, f = rooms.create('featured-room', { kind: 'dedicated' }).entry;

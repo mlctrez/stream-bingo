@@ -4,6 +4,7 @@
 //   /site-admin        the site owner's page: every room, dedicated rooms, deleting rooms
 const http = require('http');
 const fs = require('fs');
+const net = require('net');
 const path = require('path');
 const crypto = require('crypto');
 const zlib = require('zlib');
@@ -41,8 +42,24 @@ const MAX_BG_BYTES = Math.max(1, Number(process.env.MAX_BACKGROUND_MB) || 4) * 1
 // Behind N reverse proxies (each appending the address it saw), set TRUST_PROXY_HOPS=N to use the entry N hops
 // from the right, which the nearest trusted proxy wrote. The leftmost entry is never used.
 const TRUST_PROXY_HOPS = (() => { const n = Number(process.env.TRUST_PROXY_HOPS); return Number.isInteger(n) && n > 0 ? n : 0; })();
+function isLoopback(addr) {
+  const a = String(addr).replace(/^::ffff:/i, '');
+  return a === '127.0.0.1' || a === '::1';
+}
+function headerIp(v) {
+  if (!v) return '';
+  const ip = String(Array.isArray(v) ? v[0] : v).split(',')[0].trim();
+  return net.isIP(ip) ? ip : '';
+}
 function clientIp(req) {
   const sock = req.socket.remoteAddress || '';
+  // Anubis on this host flattens X-Forwarded-For to one address. The proxy in
+  // front of it names the visitor with X-Real-IP. Trust that only from loopback,
+  // so a client that can reach this port directly cannot spoof it.
+  if (isLoopback(sock)) {
+    const real = headerIp(req.headers['x-real-ip']);
+    if (real) return real;
+  }
   if (!TRUST_PROXY_HOPS) return sock;
   const h = req.headers['x-forwarded-for'];
   if (!h) return sock;
